@@ -16,7 +16,7 @@ from tqdm import tqdm
 from fastchat.llm_judge.common import load_questions, temperature_config
 from fastchat.model import load_model, get_conversation_template
 from fastchat.utils import str_to_torch_dtype
-
+from fastchat.conversation import get_conv_template, register_conv_template, Conversation, SeparatorStyle
 
 def run_eval(
     model_path,
@@ -40,7 +40,7 @@ def run_eval(
     # Split the question file into `num_gpus` files
     assert num_gpus_total % num_gpus_per_model == 0
     use_ray = num_gpus_total // num_gpus_per_model > 1
-
+    
     if use_ray:
         get_answers_func = ray.remote(num_gpus=num_gpus_per_model)(
             get_model_answers
@@ -50,6 +50,8 @@ def run_eval(
 
     chunk_size = len(questions) // (num_gpus_total // num_gpus_per_model)
     ans_handles = []
+    print("chunk_size=",chunk_size)
+    chunk_size = int(chunk_size)
     for i in range(0, len(questions), chunk_size):
         ans_handles.append(
             get_answers_func(
@@ -82,18 +84,20 @@ def get_model_answers(
     max_gpu_memory,
     dtype,
     revision,
-):
+):  
+    import math
     model, tokenizer = load_model(
         model_path,
         revision=revision,
         device="cuda",
-        num_gpus=num_gpus_per_model,
+        num_gpus=math.ceil(num_gpus_per_model),
         max_gpu_memory=max_gpu_memory,
         dtype=dtype,
         load_8bit=False,
         cpu_offloading=False,
         debug=False,
     )
+    model_chat_keyword = ["chat", "instruct", "-it"]
 
     for question in tqdm(questions):
         if question["category"] in temperature_config:
@@ -104,7 +108,16 @@ def get_model_answers(
         choices = []
         for i in range(num_choices):
             torch.manual_seed(i)
-            conv = get_conversation_template(model_id)
+
+
+            if not any([k in model_id.lower() for k in model_chat_keyword]):
+                conv = get_conv_template("alpaca")
+            elif "phi" in model_id:
+                conv = get_conv_template("starchat")
+            else:
+                conv = get_conversation_template(model_id)
+            print("Conv Template=", conv)
+
             turns = []
             for j in range(len(question["turns"])):
                 qs = question["turns"][j]
@@ -189,7 +202,6 @@ def get_model_answers(
             }
             fout.write(json.dumps(ans_json) + "\n")
 
-
 def reorg_answer_file(answer_file):
     """Sort by question id and de-duplication"""
     answers = {}
@@ -244,7 +256,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--num-gpus-per-model",
-        type=int,
+        type=float,
         default=1,
         help="The number of GPUs per model.",
     )
